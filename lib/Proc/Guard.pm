@@ -2,12 +2,21 @@ package Proc::Guard;
 use strict;
 use warnings;
 use 5.00800;
-our $VERSION = '0.03';
+our $VERSION = '0.04';
+use Carp ();
 
 # functional interface
 our @EXPORT = qw/proc_guard/;
 use Exporter 'import';
-sub proc_guard { Proc::Guard->new(command => [@_]) }
+sub proc_guard {
+    return Proc::Guard->new(do {
+        if (@_==1 && ref($_[0])  && ref($_[0]) eq 'CODE') {
+            +{ code => $_[0] }
+        } else {
+            +{ command => [@_] }
+        }
+    });
+}
 
 # OOish interface
 use POSIX;
@@ -15,14 +24,21 @@ use Class::Accessor::Lite;
 Class::Accessor::Lite->mk_accessors(qw/pid/);
 
 sub new {
-    my ($class, %args) = @_;
+    my $class = shift;
+    my %args = @_==1 ? %{$_[0]} : @_;
 
     my $self = bless {
         _owner_pid => $$,
         auto_start => 1,
         %args,
     }, $class;
-    $self->{command} = [$self->{command}] unless ref $self->{command};
+
+    if ($self->{command} && !ref($self->{command})) {
+        $self->{command} = [$self->{command}];
+    }
+    unless ($self->{command} || $self->{code}) {
+        Carp::croak("'command' or 'code' is required.");
+    }
 
     $self->start()
         if $self->{auto_start};
@@ -36,8 +52,13 @@ sub start {
     my $pid = fork();
     die "fork failed: $!" unless defined $pid;
     if ($pid == 0) { # child
-        exec @{$self->{command}};
-        die "cannot exec @{$self->{command}}: $!";
+        if ($self->{command}) {
+            exec @{$self->{command}};
+            die "cannot exec @{$self->{command}}: $!";
+        } else {
+            $self->{code}->();
+            exit(0); # exit after work
+        }
     }
     $self->pid($pid);
 }
@@ -75,10 +96,17 @@ Proc::Guard - process runner with RAII pattern
     use Proc::Guard;
 
     my $port = empty_port();
-    my $proc = proc_guard(which('memcached'), '-p', $port);
+    my $proc = proc_guard(scalar(which('memcached')), '-p', $port);
     wait_port($port);
 
     # your code here
+
+    # --------------
+    # or, use perl code
+    my $proc = proc_guard(sub {
+        ... # run this code in child process
+    });
+    ...
 
 =head1 DESCRIPTION
 
@@ -90,12 +118,18 @@ This is useful for testing code working with server process.
 
 =over 4
 
-=item proc_guard(@cmdline)
+=item proc_guard(@cmdline|\&code)
 
 This is shorthand for:
 
     Proc::Guard->new(
         command => \@cmdline,
+    );
+
+or
+
+    Proc::Guard->new(
+        code => \&code,
     );
 
 =back
@@ -117,6 +151,12 @@ Create and run a process. The process is terminated when the returned object is 
     Proc::Guard->new(command => ['/path/to/memcached', '-p', '11211']);
 
 The command line.
+
+=item code
+
+    Proc::Guard->new(code => sub { ... });
+
+'code' or 'command' is required.
 
 =item auto_start
 
